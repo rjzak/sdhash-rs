@@ -7,13 +7,14 @@ keywords = ["forensics", "hashing", "malware", "similarity"]
 description = "Rust implementation of the sdhash similarity algorithm by Vassil Roussev and Candice Quates."
 
 [dependencies]
-anyhow = {version = "1.0.68", features = ["std"], default-features = false }
+anyhow = {version = "1.0", features = ["std"], default-features = false }
 hex = { version = "0.4.3", features = ["alloc"], default-features = false }
-lazy_static = { version = "1.4.0", default-features = false }
+lazy_static = { version = "1.5.0", default-features = false }
 lz4-compression = { version = "0.7.0", default-features = false }
+sha1 = { version = "0.11", default-features = false }
 
 [dev-dependencies]
-rstest = { version = "0.16", default-features = false }
+rstest = { version = "0.26", default-features = false }
 
 [profile.release]
 incremental = false

@@ -1,17 +1,21 @@
-#![allow(unused)]
-
 use super::defines;
-
-use std::sync::RwLock;
-
 use lazy_static::lazy_static;
 
 lazy_static! {
-    pub static ref BIT_COUNT_16: [u8; 64 * defines::KB as usize] = init_bit_count_16();
-    pub static ref ENTROPY_64_INT: [u64; 65] = entr64_table_init_int();
-    pub static ref BF_EST_CACHE: RwLock<Vec<Vec<u16>>> = RwLock::new(vec![vec![0u16; 256]; 256]);
+    /// Entropy contribution of k occurrences in a 64-byte window.
+    /// ENTROPY_64_INT[k] = (-k/64 * log2(k/64) / 6) * ENTR_SCALE
+    pub static ref ENTROPY_64_INT: [u64; 65] = {
+        let mut arr = [0u64; 65];
+        for (i, slot) in arr.iter_mut().enumerate().skip(1) {
+            let p = i as f64 / 64.0;
+            *slot = ((-p * (p.log10() / 2.0f64.log10()) / 6.0) * defines::ENTR_SCALE as f64) as u64;
+        }
+        arr
+    };
 }
 
+/// Maps entropy value (shifted right by ENTR_POWER) to a popularity rank.
+/// Positions where rank >= threshold (16) are selected as sdhash features.
 pub const ENTR64_RANKS: [u32; 1001] = [
     000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000,
     000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000,
@@ -68,6 +72,8 @@ pub const ENTR64_RANKS: [u32; 1001] = [
     501, 502, 503, 000, 000, 000, 000, 000, 000, 000, 000, 000, 000,
 ];
 
+/// Minimum AND-popcount score for two 256-byte Bloom filters to be considered a match,
+/// indexed by mn = floor(2 * 2048 / (n1 + n2)) where n1, n2 are element counts.
 pub const CUTOFFS256: [u32; 149] = [
     1250, 1250, 1250, 1250, 1006, 806, 650, 534, 442, 374, 319, 273, 240, 210, 184, 166, 148, 132,
     121, 110, 100, 93, 85, 78, 72, 67, 63, 59, 55, 52, 48, 45, 43, 40, 38, 37, 35, 32, 31, 30, 28,
@@ -76,140 +82,3 @@ pub const CUTOFFS256: [u32; 149] = [
     7, 7, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3,
     3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
 ];
-
-pub const CUTOFFS64: [u32; 149] = [
-    354, 354, 354, 354, 277, 220, 178, 147, 123, 105, 90, 80, 70, 61, 57, 50, 46, 42, 37, 35, 33,
-    29, 27, 26, 24, 23, 22, 21, 19, 19, 18, 17, 16, 15, 14, 14, 14, 14, 13, 13, 11, 11, 11, 11, 10,
-    10, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 8, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4,
-    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    3, 3, 3, 3, 3, 3, 3, 3, 2,
-];
-
-#[derive(Clone, Copy, Debug)]
-pub struct SdbfConfig {
-    /// number of threads available
-    pub thread_count: u32,
-    pub entr_win_size: u32,
-    pub bf_size: u32,
-    pub pop_win_size: u32,
-    pub block_size: u32,
-    /// maximum elements per bf
-    pub max_elem: u32,
-    /// maximum elements per bf - dd mode
-    pub max_elem_dd: u32,
-
-    /// whether to process warnings
-    pub warnings: u8,
-    pub threshold: u8,
-    pub popcnt: bool,
-}
-
-impl SdbfConfig {
-    pub fn new(mut thread_count: u32, warnings: u8, max_elem: u32, max_elem_dd: u32) -> Self {
-        if thread_count > defines::MAX_THREADS {
-            thread_count = defines::MAX_THREADS;
-        }
-        Self {
-            thread_count,
-            entr_win_size: 64,
-            bf_size: 256,
-            pop_win_size: 64,
-            block_size: 4 * defines::KB as u32,
-            max_elem,
-            max_elem_dd,
-            warnings,
-            threshold: 16, // or 1
-            popcnt: false,
-        }
-    }
-}
-
-impl Default for SdbfConfig {
-    fn default() -> Self {
-        SdbfConfig::new(
-            1,
-            defines::FLAG_OFF,
-            defines::MAX_ELEM_COUNT,
-            defines::MAX_ELEM_COUNT_DD,
-        )
-    }
-}
-
-fn init_bit_count_16() -> [u8; 64 * defines::KB as usize] {
-    let mut array = [0u8; 64 * defines::KB as usize];
-
-    for byte in 0..64 * defines::KB as usize {
-        for bit in 0..16usize {
-            if byte & 0x1usize << bit > 0 {
-                array[byte] += 1;
-            }
-        }
-    }
-
-    array
-}
-
-/// Entropy lookup table setup--int64 version (to be called once)
-fn entr64_table_init_int() -> [u64; 65] {
-    let mut array = [0u64; 65];
-
-    for i in 1..65usize {
-        let mut p = i as f64 / 64.0;
-        p = (-p * (p.log10() / 2.0f64.log10()) / 6.0) * defines::ENTR_SCALE as f64;
-        array[i] = p as u64;
-    }
-
-    array
-}
-
-/// Baseline entropy computation for a 64-byte buffer--int64 version (to be called periodically)
-fn entr64_u8(buffer: &Vec<u8>, ascii: &mut Vec<u8>) -> u64 {
-    ascii.resize(258, 0);
-    for i in 0..64usize {
-        let bf = buffer[i];
-        ascii[bf as usize] += 1;
-    }
-
-    let mut entr = 0;
-
-    for i in 0..256usize {
-        if ascii[i] != 0 {
-            entr += ENTROPY_64_INT[ascii[i] as usize];
-        }
-    }
-
-    entr
-}
-
-/// Incremental (rolling) update to entropy computation--int64 version
-fn entr64_u64(prev_entropy: u64, buffer: &Vec<u8>, ascii: &mut Vec<u8>) -> u64 {
-    if buffer[0] == buffer[64] {
-        return prev_entropy;
-    }
-
-    let old_char_count = ascii[buffer[0] as usize];
-    let new_char_count = ascii[buffer[64] as usize];
-
-    ascii[buffer[0] as usize] -= 1;
-    ascii[buffer[64] as usize] += 1;
-
-    if old_char_count == new_char_count + 1 {
-        return prev_entropy;
-    }
-
-    let old_diff = ENTROPY_64_INT[old_char_count as usize] as i64
-        - ENTROPY_64_INT[(old_char_count - 1) as usize] as i64;
-
-    let new_diff = ENTROPY_64_INT[(new_char_count + 1) as usize] as i64
-        - ENTROPY_64_INT[new_char_count as usize] as i64;
-
-    let mut entropy = prev_entropy as i64 - old_diff + new_diff;
-    if entropy < 0 {
-        entropy = 0;
-    } else if entropy > defines::ENTR_SCALE as i64 {
-        entropy = defines::ENTR_SCALE as i64
-    }
-
-    entropy as u64
-}
